@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# todo: remove this and use /bin/sh
+set -o pipefail
+
+USAGE="$0 [-v] <HTTP-URL> [<name>]"
+
+usage() {
+  echo "$USAGE"
+  echo "republish http URL to ipfs"
+  exit 0
+}
+
+die() {
+  echo >&2 "error: $@"
+  exit 1
+}
+
+log() {
+  if [ $verbose ]; then
+    printf >&2 "$@"
+  fi
+}
+
+geturl() {
+  url_=$1
+  fpath_=$2
+
+  if type curl >/dev/null; then
+    curl -o "$fpath" -s "$url" || die "failed to fetch url (curl)"
+  elif type wget >/dev/null; then
+    wget -O "$fpath" -q "$url" || die "failed to fetch url (wget)"
+  else
+    die "please install curl or wget. or improve this script."
+  fi
+}
+
+# arguments (in order)
+url=
+name=
+
+# get user options
+while [ $# -gt 0 ]; do
+  # get options
+  arg="$1"
+  shift
+
+  case "$arg" in
+  -h|--help) usage ;;
+  -v|--verbose) verbose=1 ;;
+  --*)
+    die "unrecognised option: '$arg'\n$USAGE" ;;
+  *)
+    if [ "$url" = "" ]; then
+      url="$arg"
+    elif ["$name" = ""]; then
+      name="$arg"
+    else
+      die "too many arguments\n$USAGE"
+    fi
+    ;;
+  esac
+done
+
+if [ "$url" = "" ]; then
+  usage
+fi
+
+# try using basename on the url
+if [ "$name" = "" ]; then
+  name=$(basename "$url") || die "could not get name of url"
+fi
+
+# hmmmm. just use "paste" then.
+if [ "$name" = "" ]; then
+  name=paste
+fi
+
+# make temporary file
+date=$(date +"%Y-%m-%dT%H:%M:%SZ")
+fpath=$(mktemp "/tmp/paste.$date.XXXXXX.txt") ||
+die "could not 'mktemp /tmp/paste.$date.XXXXXX.txt'"
+
+log "fetching $url ..."
+geturl $url $fpath
+log " done\n"
+
+log "adding to ipfs ..."
+fhash=$(ipfs add -q <"$fpath" | tail -n1) ||
+die "could not 'ipfs add -q' content from '$fpath'"
+log " $fhash\n"
+
+# patch name. need --name in ipfs add ...
+log "constructing dir..."
+dir=$(ipfs object new unixfs-dir) ||
+die "could not 'ipfs object new unixfs-dir'"
+dir=$(ipfs object patch "$dir" add-link "$name" "$fhash") ||
+die "could not 'ipfs object patch $dir add-link $name $fhash'"
+pin=$(ipfs pin add -r "$dir") ||
+die "could not 'ipfs pin add -r $dir'"
+log " $dir\n"
+
+out="http://gateway.ipfs.io/ipfs/$dir/$name"
+echo "$out"
+
+log "preloading on the gateways..."
+(curl "$out" >/dev/null 2>&1 && log " ok\n") || log " n/a\n"
